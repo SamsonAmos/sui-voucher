@@ -1,222 +1,197 @@
-/*
-Disclaimer: Use of Unaudited Code for Educational Purposes Only
-This code is provided strictly for educational purposes and has not undergone any formal security audit. 
-It may contain errors, vulnerabilities, or other issues that could pose risks to the integrity of your system or data.
-
-By using this code, you acknowledge and agree that:
-    - No Warranty: The code is provided "as is" without any warranty of any kind, either express or implied. The entire risk as to the quality and performance of the code is with you.
-    - Educational Use Only: This code is intended solely for educational and learning purposes. It is not intended for use in any mission-critical or production systems.
-    - No Liability: In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the use or performance of this code.
-    - Security Risks: The code may not have been tested for security vulnerabilities. It is your responsibility to conduct a thorough security review before using this code in any sensitive or production environment.
-    - No Support: The authors of this code may not provide any support, assistance, or updates. You are using the code at your own risk and discretion.
-
-Before using this code, it is recommended to consult with a qualified professional and perform a comprehensive security assessment. By proceeding to use this code, you agree to assume all associated risks and responsibilities.
-*/
-
-#[lint_allow(self_transfer)]
-module dacade_deepbook::book {
-    use deepbook::clob_v2 as deepbook;
-    use deepbook::custodian_v2 as custodian;
+module dacade_deepbook::voucher_manager {
+    use std::string::{String};
+    use sui::balance::{Balance, zero};
+    use sui::coin::{Coin, take, put, value as coin_value};
     use sui::sui::SUI;
-    use sui::tx_context::{TxContext, Self};
-    use sui::coin::{Coin, Self};
-    use sui::balance::{Self};
-    use sui::transfer::Self;
-    use sui::clock::Clock;
+    use sui::object::{new, uid_to_inner};
+    use sui::event;
 
-    const FLOAT_SCALING: u64 = 1_000_000_000;
+    // Custom error codes
+    const EVOUCHEREXPIRED: u64 = 0; // Error: Voucher has expired or is already redeemed
+    const EUNAUTHORIZED: u64 = 2;   // Error: Unauthorized access or invalid user ID
 
-
-    public fun new_pool<Base, Quote>(payment: &mut Coin<SUI>, ctx: &mut TxContext) {
-        let balance = coin::balance_mut(payment);
-        let fee = balance::split(balance, 100 * 1_000_000_000);
-        let coin = coin::from_balance(fee, ctx);
-
-        deepbook::create_pool<Base, Quote>(
-            1 * FLOAT_SCALING,
-            1,
-            coin,
-            ctx
-        );
+    /// User structure
+    /// Represents a user with an ID, name, balance in SUI, and a list of redeemed vouchers
+    public struct User has store {
+        id: u64,
+        name: String,
+        balance: Balance<SUI>,
+        redeemed_vouchers: vector<u64>,
     }
 
-    public fun new_custodian_account(ctx: &mut TxContext) {
-        transfer::public_transfer(deepbook::create_account(ctx), tx_context::sender(ctx))
+    /// Voucher structure
+    /// Represents a voucher with an ID, description, value in SUI, and a redemption status
+    public struct Voucher has store {
+        id: u64,
+        description: String,
+        value: u64, // Value in SUI
+        is_redeemed: bool,
     }
 
-    public fun make_base_deposit<Base, Quote>(pool: &mut deepbook::Pool<Base, Quote>, coin: Coin<Base>, account_cap: &custodian::AccountCap) {
-        deepbook::deposit_base(pool, coin, account_cap)
+    /// Voucher Manager structure
+    /// Manages users, vouchers, and overall balance
+    public struct VoucherManager has key, store {
+        id: UID,
+        balance: Balance<SUI>, // Total SUI balance of the manager
+        vouchers: vector<Voucher>, // List of vouchers managed
+        users: vector<User>, // List of registered users
+        voucher_count: u64, // Total number of vouchers issued
+        user_count: u64,    // Total number of users registered
     }
 
-    public fun make_quote_deposit<Base, Quote>(pool: &mut deepbook::Pool<Base, Quote>, coin: Coin<Quote>, account_cap: &custodian::AccountCap) {
-        deepbook::deposit_quote(pool, coin, account_cap)
+    /// Events for tracking actions
+    public struct ManagerFunded has copy, drop {
+        manager_id: ID,
+        amount: u64, // Amount funded to the manager
     }
 
-    public fun withdraw_base<BaseAsset, QuoteAsset>(
-        pool: &mut deepbook::Pool<BaseAsset, QuoteAsset>,
-        quantity: u64,
-        account_cap: &custodian::AccountCap,
+    public struct VoucherIssued has copy, drop {
+        voucher_id: u64,
+        description: String,
+        value: u64, // Value of the issued voucher
+    }
+
+    public struct VoucherRedeemed has copy, drop {
+        user_id: u64,
+        voucher_id: u64,
+        value: u64, // Value of the redeemed voucher
+    }
+
+    public struct UserRegistered has copy, drop {
+        user_id: u64,
+        name: String, // Name of the registered user
+    }
+
+    /// Initialize a voucher manager
+    /// Creates and shares a new `VoucherManager` object on-chain
+    public entry fun create_manager(ctx: &mut TxContext) {
+        // Generate UID for the manager
+        let manager_uid = new(ctx);
+
+        // Initialize a new VoucherManager object with default values
+        let manager = VoucherManager {
+            id: manager_uid,
+            balance: zero<SUI>(),
+            vouchers: vector::empty(),
+            users: vector::empty(),
+            voucher_count: 0,
+            user_count: 0,
+        };
+
+        // Share the VoucherManager object on-chain
+        transfer::share_object(manager);
+    }
+
+    /// Register a user to the voucher manager
+    /// Adds a new user to the manager's user list and emits a registration event
+    public entry fun register_user(
+        manager: &mut VoucherManager,
+        name: String,
+        _ctx: &mut TxContext
+    ) {
+        // Get the current user count to assign a unique ID
+        let user_count = manager.user_count;
+
+        // Create a new user object
+        let new_user = User {
+            id: user_count,
+            name,
+            balance: zero<SUI>(),
+            redeemed_vouchers: vector::empty(),
+        };
+
+        // Add the user to the manager's user list and increment the user count
+        vector::push_back(&mut manager.users, new_user);
+        manager.user_count = user_count + 1;
+
+        // Emit a user registration event
+        event::emit(UserRegistered {
+            user_id: user_count,
+            name,
+        });
+    }
+
+    /// Issue a voucher
+    /// Creates a new voucher and adds it to the manager's voucher list
+    public entry fun issue_voucher(
+        manager: &mut VoucherManager,
+        description: String,
+        value: u64,
+        _ctx: &mut TxContext
+    ) {
+        // Get the current voucher count to assign a unique ID
+        let voucher_count = manager.voucher_count;
+
+        // Create a new voucher object
+        let new_voucher = Voucher {
+            id: voucher_count,
+            description,
+            value,
+            is_redeemed: false,
+        };
+
+        // Add the voucher to the manager's voucher list and increment the voucher count
+        vector::push_back(&mut manager.vouchers, new_voucher);
+        manager.voucher_count = voucher_count + 1;
+
+        // Emit a voucher issuance event
+        event::emit(VoucherIssued {
+            voucher_id: voucher_count,
+            description,
+            value,
+        });
+    }
+
+    /// Fund the manager
+    /// Adds SUI funds to the manager's balance and emits a funding event
+    public entry fun fund_manager(
+        manager: &mut VoucherManager,
+        coins: Coin<SUI>, // Accept Coin<SUI>
+        _ctx: &mut TxContext
+    ) {
+        // Get the coin value
+        let amount = coin_value<SUI>(&coins);
+
+        // Add the coin to the manager's balance
+        put(&mut manager.balance, coins);
+
+        // Emit the funding event
+        event::emit(ManagerFunded {
+            manager_id: uid_to_inner(&manager.id),
+            amount,
+        });
+    }
+
+    /// Redeem a voucher
+    /// Validates and processes voucher redemption for a user
+    public entry fun redeem_voucher(
+        manager: &mut VoucherManager,
+        user_id: u64,
+        voucher_id: u64,
         ctx: &mut TxContext
     ) {
-        let base = deepbook::withdraw_base(pool, quantity, account_cap, ctx);
-        transfer::public_transfer(base, tx_context::sender(ctx));
-    }
+        // Validate user existence
+        assert!(user_id < vector::length(&manager.users), EUNAUTHORIZED);
+        let user = vector::borrow_mut(&mut manager.users, user_id);
 
-    public fun withdraw_quote<BaseAsset, QuoteAsset>(
-        pool: &mut deepbook::Pool<BaseAsset, QuoteAsset>,
-        quantity: u64,
-        account_cap: &custodian::AccountCap,
-        ctx: &mut TxContext
-    ) {
-        let quote = deepbook::withdraw_quote(pool, quantity, account_cap, ctx);
-        transfer::public_transfer(quote, tx_context::sender(ctx));
-    }
+        // Validate voucher existence and redemption status
+        assert!(voucher_id < vector::length(&manager.vouchers), EVOUCHEREXPIRED);
+        let voucher = vector::borrow_mut(&mut manager.vouchers, voucher_id);
+        assert!(!voucher.is_redeemed, EVOUCHEREXPIRED);
 
-    public fun place_limit_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        client_order_id: u64,
-        price: u64, 
-        quantity: u64, 
-        self_matching_prevention: u8,
-        is_bid: bool,
-        expire_timestamp: u64,
-        restriction: u8,
-        clock: &Clock,
-        account_cap: &custodian::AccountCap,
-        ctx: &mut TxContext
-    ): (u64, u64, bool, u64) {
-        deepbook::place_limit_order(
-            pool, 
-            client_order_id, 
-            price, 
-            quantity, 
-            self_matching_prevention, 
-            is_bid, 
-            expire_timestamp, 
-            restriction, 
-            clock, 
-            account_cap, 
-            ctx
-        )
-    }
+        // Mark voucher as redeemed and record it in the user's redeemed vouchers
+        voucher.is_redeemed = true;
+        vector::push_back(&mut user.redeemed_vouchers, voucher_id);
 
-    public fun place_base_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        base_coin: Coin<Base>,
-        client_order_id: u64,
-        is_bid: bool,
-        clock: &Clock,
-        ctx: &mut TxContext,
-    ) {
-        let quote_coin = coin::zero<Quote>(ctx);
-        let quantity = coin::value(&base_coin);
-        place_market_order(
-            pool,
-            account_cap,
-            client_order_id,
-            quantity,
-            is_bid,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        )
-    }
+        // Transfer the voucher value from the manager to the user's balance
+        let redeemed_amount = take(&mut manager.balance, voucher.value, ctx);
+        put(&mut user.balance, redeemed_amount);
 
-    public fun place_quote_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        quote_coin: Coin<Quote>,
-        client_order_id: u64,
-        is_bid: bool,
-        clock: &Clock,
-        ctx: &mut TxContext,
-    ) {
-        let base_coin = coin::zero<Base>(ctx);
-        let quantity = coin::value(&quote_coin);
-        place_market_order(
-            pool,
-            account_cap,
-            client_order_id,
-            quantity,
-            is_bid,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        )
-    }
-
-    fun place_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        client_order_id: u64,
-        quantity: u64,
-        is_bid: bool,
-        base_coin: Coin<Base>,
-        quote_coin: Coin<Quote>,
-        clock: &Clock, // @0x6 hardcoded id of the Clock object
-        ctx: &mut TxContext,
-    ) {
-        let (base, quote) = deepbook::place_market_order(
-            pool, 
-            account_cap, 
-            client_order_id, 
-            quantity, 
-            is_bid, 
-            base_coin, 
-            quote_coin, 
-            clock, 
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
-    }
-
-    public fun swap_exact_base_for_quote<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        client_order_id: u64,
-        account_cap: &custodian::AccountCap,
-        quantity: u64,
-        base_coin: Coin<Base>,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        let quote_coin = coin::zero<Quote>(ctx);
-        let (base, quote, _) = deepbook::swap_exact_base_for_quote(
-            pool,
-            client_order_id,
-            account_cap,
-            quantity,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
-    }
-
-    public fun swap_exact_quote_for_base<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        quote_coin: Coin<Quote>,
-        client_order_id: u64,
-        quantity: u64,
-        clock: &Clock,
-        ctx: &mut TxContext,
-    ) {
-        let (base, quote, _) = deepbook::swap_exact_quote_for_base(
-            pool,
-            client_order_id,
-            account_cap,
-            quantity,
-            clock,
-            quote_coin,
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
+        // Emit a voucher redemption event
+        event::emit(VoucherRedeemed {
+            user_id,
+            voucher_id,
+            value: voucher.value,
+        });stat
     }
 }
