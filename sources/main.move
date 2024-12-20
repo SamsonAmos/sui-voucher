@@ -192,6 +192,17 @@ module dacade_deepbook::voucher_manager {
             user_id,
             voucher_id,
             value: voucher.value,
-        });stat
+        });
+    }
+
+    /// Get user balance
+    /// Returns the balance of a specific user
+    public fun get_user_balance(manager: &VoucherManager, user_id: u64): u64 {
+        // Validate user existence
+        assert!(user_id < vector::length(&manager.users), EUNAUTHORIZED);
+        let user = vector::borrow(&manager.users, user_id);
+
+        // Return the user's balance
+        coin_value<SUI>(&user.balance)
     }
 }
