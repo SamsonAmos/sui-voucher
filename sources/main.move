@@ -192,6 +192,6 @@ module dacade_deepbook::voucher_manager {
             user_id,
             voucher_id,
             value: voucher.value,
-        });stat
+        });
     }
 }
