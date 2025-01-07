@@ -1,11 +1,11 @@
 [package]
-name = "dacade_deepbook"
+name = "voucher_manager"
 edition = "2024.beta" # edition = "legacy" to use legacy (pre-2024) Move
 
 
 [dependencies]
 Sui = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/sui-framework", rev = "framework/testnet" }
-DeepBook = { git = "https://github.com/MystenLabs/sui.git", subdir = "crates/sui-framework/packages/deepbook", rev = "framework/testnet" }
+
 
 [addresses]
-dacade_deepbook = "0x0"
+voucher_manager = "0x0"
